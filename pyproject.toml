@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mt5bridge"
+version = "0.1.0"
+description = "Read-only MetaTrader 5 bridge: trade journal, candles on any timeframe, MAE/MFE and live positions as JSON. CLI utility with an MCP server on top. Works on macOS (Wine), Windows and Linux."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["metatrader", "mt5", "mql5", "mcp", "trading-journal", "claude", "forex"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp>=2.3"]
+chart = ["matplotlib>=3.8"]
+all = ["mcp>=2.3", "matplotlib>=3.8"]
+dev = ["mcp>=2.3", "matplotlib>=3.8", "pytest>=8"]
+
+[project.scripts]
+mt5bridge = "mt5bridge.cli:main"
+mt5bridge-mcp = "mt5bridge.mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mt5bridge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
