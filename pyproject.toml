@@ -20,6 +20,10 @@ classifiers = [
 ]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/RomanKytseniuk/mt5bridge"
+Issues = "https://github.com/RomanKytseniuk/mt5bridge/issues"
+
 [project.optional-dependencies]
 mcp = ["mcp>=2.3"]
 chart = ["matplotlib>=3.8"]

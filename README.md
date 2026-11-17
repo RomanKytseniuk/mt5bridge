@@ -26,14 +26,15 @@ you / scripts / Claude via shell ──▶ mt5bridge CLI ─┤  Python core
 Requires Python 3.10+ and MetaTrader 5.
 
 ```bash
-git clone <this repo> mt5bridge && cd mt5bridge
+git clone https://github.com/RomanKytseniuk/mt5bridge.git && cd mt5bridge
 python3 -m venv .venv
 .venv/bin/pip install -e ".[all]"      # [mcp] and [chart] are separate extras too
 ```
 
 ## Install with an AI agent
 
-Give your agent (Claude Code, OpenCode, ...) this repository and say *"install mt5bridge"*.
+Give your agent (Claude Code, OpenCode, ...) the link https://github.com/RomanKytseniuk/mt5bridge
+and say *"install mt5bridge"*.
 These steps are written for it. Do every step yourself; give the user step-by-step instructions
 only for a step that failed or that needs the MT5 window.
 
