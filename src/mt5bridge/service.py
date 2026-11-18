@@ -11,8 +11,8 @@ from .errors import BridgeError, RemoteError
 from .install import packaged_ea_version, version_tuple
 from .terminal import EA_NAME, USER_STEPS, install_dir, is_running
 from .timeframes import TF_SECONDS, auto_tf, normalize_tf
-from .timeutil import fmt_duration, fmt_time, parse_time
-from .trades import build_trades, positions_missing_entry, public, short_enum
+from .timeutil import day_begin, fmt_duration, fmt_time, parse_time
+from .trades import SIDES, build_trades, positions_missing_entry, public, short_enum
 
 DEFAULT_LOOKBACK_S = 30 * 86400
 EXCURSION_LADDER = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
@@ -113,6 +113,11 @@ class Bridge:
         result["tick_time"] = fmt_time(info["tick_time_msc"] / 1000) if info.get("tick_time_msc") else None
         result.pop("tick_time_msc", None)
         return result
+
+    def symbol_spec(self, symbol: str) -> dict[str, Any]:
+        """The symbol's specification (digits, tick size and value, contract size...), fetched once per
+        Bridge. For analysis code that needs it on every refresh, like risk per position."""
+        return self._symbol_info(symbol)
 
     def _symbol_info(self, symbol: str) -> dict[str, Any]:
         if symbol not in self._symbols:
@@ -246,18 +251,27 @@ class Bridge:
         raise BridgeError(f"trade {tid} not found in this account's history")
 
     def _trade_bundle(self, trade_id: str | int, timeframe: str | None, bars_before: int, bars_after: int,
-                      max_bars: int) -> dict[str, Any]:
+                      max_bars: int, candles: bool = True) -> dict[str, Any]:
         t = self._find_trade(trade_id)
         try:
-            return self._trade_market_data(t, timeframe, bars_before, bars_after, max_bars)
+            return self._trade_market_data(t, timeframe, bars_before, bars_after, max_bars, candles)
         except RemoteError as exc:
             # Old trades on symbols the broker has since removed (e.g. EURUSD+ -> EURUSD.s).
             return {"trade": t, "excursions": None, "tf": None, "rows": [], "truncated": False,
                     "entry_index": None, "exit_index": None,
                     "unavailable": f"no market data for {t['symbol']}: {exc}. The broker may have removed this symbol."}
 
+    def _excursions(self, t: dict[str, Any], info: dict[str, Any], end_ts: float) -> dict[str, Any] | None:
+        duration = max(end_ts - t["_open_ts"], 1)
+        ex_tf = next((tf for tf in EXCURSION_LADDER if duration / TF_SECONDS[tf] <= EXCURSION_MAX_BARS), "D1")
+        try:
+            ex_rows = self._rates(t["symbol"], ex_tf, frm=int(t["_open_ts"]) - TF_SECONDS[ex_tf], to=int(end_ts))["rows"]
+            return analysis.excursions(t, ex_rows, ex_tf, TF_SECONDS[ex_tf], info)
+        except RemoteError as exc:
+            return {"error": str(exc)}
+
     def _trade_market_data(self, t: dict[str, Any], timeframe: str | None, bars_before: int, bars_after: int,
-                           max_bars: int) -> dict[str, Any]:
+                           max_bars: int, candles: bool = True) -> dict[str, Any]:
         info = self._symbol_info(t["symbol"])
         now = self.server_now()
         if t["status"] == "open":
@@ -266,13 +280,10 @@ class Bridge:
             t["_current_price"] = quote.get("bid") if t["side"] == "buy" else quote.get("ask")
         end_ts = t["_close_ts"] or now
         duration = max(end_ts - t["_open_ts"], 1)
-
-        ex_tf = next((tf for tf in EXCURSION_LADDER if duration / TF_SECONDS[tf] <= EXCURSION_MAX_BARS), "D1")
-        try:
-            ex_rows = self._rates(t["symbol"], ex_tf, frm=int(t["_open_ts"]) - TF_SECONDS[ex_tf], to=int(end_ts))["rows"]
-            excursions = analysis.excursions(t, ex_rows, ex_tf, TF_SECONDS[ex_tf], info)
-        except RemoteError as exc:
-            excursions = {"error": str(exc)}
+        excursions = self._excursions(t, info, end_ts)
+        if not candles:
+            return {"trade": t, "excursions": excursions, "tf": None, "rows": [], "truncated": False,
+                    "entry_index": None, "exit_index": None, "digits": info.get("digits")}
 
         target = max(10, min(80, max_bars - bars_before - bars_after))
         tf = normalize_tf(timeframe) if timeframe else auto_tf(duration, target)
@@ -293,7 +304,7 @@ class Bridge:
 
     def trade(self, trade_id: str | int, timeframe: str | None = None, bars_before: int = 30,
               bars_after: int = 15, max_bars: int = 300, include_candles: bool = True) -> dict[str, Any]:
-        b = self._trade_bundle(trade_id, timeframe, bars_before, bars_after, max_bars)
+        b = self._trade_bundle(trade_id, timeframe, bars_before, bars_after, max_bars, include_candles)
         t = b["trade"]
         result: dict[str, Any] = {"trade": public(t), "excursions": b["excursions"], "note": TIMES_NOTE}
         if "unavailable" in b:
@@ -306,6 +317,21 @@ class Bridge:
                 candles["warning"] = "candles cut at max_bars; use a larger timeframe to see the whole trade"
             result["candles"] = candles
         return result
+
+    # ------------------------------------------------------------------ for analysis code (AI facts)
+    def closed_trades(self, date_from: str = "90d", symbol: str | None = None,
+                      side: str | None = None) -> list[dict[str, Any]]:
+        """Closed trades, oldest first, with their internal "_" fields (input for analysis, not output)."""
+        selected, _, _, _ = self._collect(date_from, None, symbol, side)
+        return sorted((t for t in selected if t["status"] == "closed"), key=lambda t: t["_close_ts"])
+
+    def excursions_of(self, t: dict[str, Any]) -> dict[str, Any] | None:
+        """MAE / MFE / R of one closed trade from closed_trades()."""
+        try:
+            info = self._symbol_info(t["symbol"])
+        except RemoteError:
+            return None
+        return self._excursions(t, info, t["_close_ts"])
 
     # ------------------------------------------------------------------ live
     def live(self) -> dict[str, Any]:
@@ -338,6 +364,28 @@ class Bridge:
             "floating": round(sum(p["profit"] + p["swap"] for p in positions), 2),
             "positions": items,
         }
+
+    # ------------------------------------------------------------------ today
+    def today_activity(self, day_start: str = "00:00") -> dict[str, Any]:
+        """Today's realized result, cash operations and trades (opened or closed today). day_start is
+        when the trading day starts, "HH:MM" server time.
+
+        Trades keep their internal "_" fields: input for analysis code (like trading rules), not output.
+        """
+        now = self.server_now()
+        begin = day_begin(now, day_start)
+        unique = {d["ticket"]: d for d in self._deals(begin, now + 60)}
+        realized = cash = 0.0
+        for d in unique.values():
+            if d["time_msc"] / 1000 < begin:
+                continue
+            if d["type"] in SIDES:
+                realized += d["profit"] + d["commission"] + d["swap"] + d.get("fee", 0.0)
+            else:
+                cash += d["profit"]
+        trades, _ = build_trades(list(unique.values()))
+        today = [t for t in trades if (t["_close_ts"] or 0) >= begin or (t["_open_ts"] or 0) >= begin]
+        return {"begin": begin, "realized": round(realized, 2), "cash": round(cash, 2), "trades": today}
 
     # ------------------------------------------------------------------ charts
     def chart(self, trade_id: str | int | None = None, symbol: str | None = None, timeframe: str | None = None,

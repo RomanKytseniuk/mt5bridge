@@ -263,3 +263,13 @@ def test_setup_installs_skill_and_reports_compile(tmp_path, capsys, monkeypatch)
     with pytest.raises(BridgeError, match="not a copy"):
         install.install_skill(foreign)  # never overwrites a folder that is not this skill
     assert "something-else" in (foreign / "mt5bridge" / "SKILL.md").read_text()
+
+
+def test_today_activity(bridge):
+    from mt5bridge.testing import ts
+
+    d = bridge.today_activity()
+    assert d["begin"] == ts("2026-11-16 00:00")
+    assert d["realized"] == -0.35  # only today's deal: the 1005 entry commission
+    assert [(t["id"], t["status"]) for t in d["trades"]] == [("1005", "open")]
+    assert bridge.today_activity("17:00")["begin"] == ts("2026-11-15 17:00")

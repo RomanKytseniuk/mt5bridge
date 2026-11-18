@@ -78,3 +78,10 @@ def fmt_duration(seconds: float | None) -> str | None:
     if not parts:
         parts.append(f"{s}s")
     return " ".join(parts)
+
+
+def day_begin(now: int, day_start: str = "00:00") -> int:
+    """Server epoch of the latest trading day start ("HH:MM", server time) at or before `now`."""
+    hours, _, minutes = str(day_start).strip().partition(":")
+    offset = (int(hours) * 60 + int(minutes or 0)) * 60
+    return now - (now - offset) % 86400

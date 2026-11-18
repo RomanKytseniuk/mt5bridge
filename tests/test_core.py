@@ -1,6 +1,6 @@
 import pytest
 
-from fake_ea import DEALS, NOW, ts
+from mt5bridge.testing import DEALS, NOW, ts
 from mt5bridge.timeframes import auto_tf, normalize_tf
 from mt5bridge.timeutil import parse_time
 from mt5bridge.trades import build_trades

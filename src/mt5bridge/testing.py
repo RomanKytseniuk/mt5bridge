@@ -1,4 +1,6 @@
-"""A stand-in for the MT5Bridge expert advisor: same file protocol, canned account data."""
+"""A stand-in for the MT5Bridge expert advisor: same file protocol, canned account data.
+
+For tests of mt5bridge and of code built on it: `with FakeEA(bridge_dir) as ea: Bridge(bridge_dir=...)`."""
 
 import json
 import os

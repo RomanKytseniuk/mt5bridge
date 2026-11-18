@@ -1,11 +1,6 @@
-import sys
-from pathlib import Path
-
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent))
-
-from fake_ea import FakeEA  # noqa: E402
+from mt5bridge.testing import FakeEA
 
 
 @pytest.fixture
