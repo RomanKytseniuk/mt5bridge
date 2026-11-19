@@ -68,6 +68,24 @@ def test_trade_with_explicit_tf_and_cap(bridge):
     assert "warning" in res["candles"]
 
 
+def test_mae_mfe_climb_to_a_timeframe_that_still_has_history(bridge, fake_ea, monkeypatch):
+    # Brokers keep M1/M5 history for months only; older trades are measured on M15 and up.
+    monkeypatch.setattr("mt5bridge.service.time.sleep", lambda s: None)
+    real, asked = fake_ea.rates, []
+
+    def rates(p):
+        asked.append(p["tf"])
+        if p["tf"] == "M1":
+            raise ValueError("history_loading: CopyRates failed, error 4401")
+        return real(p)
+    fake_ea.rates = rates
+    ex = bridge.trade("1001", include_candles=False)["excursions"]
+    assert ex["tf"] == "M5" and ex["mfe_points"] == pytest.approx(600.0) and ex["r_multiple"] == 2.5
+    asked.clear()
+    assert bridge.trade("1001", include_candles=False)["excursions"]["tf"] == "M5"
+    assert "M1" not in asked  # remembered: no second wait for history that is not there
+
+
 def test_open_trade_uses_current_price(bridge):
     res = bridge.trade("1005", include_candles=False)
     assert res["trade"]["status"] == "open"
@@ -88,6 +106,27 @@ def test_delisted_symbol_trade_still_returned(bridge):
     assert "removed this symbol" in res["market_data"]
     with pytest.raises(BridgeError, match="no market data"):
         bridge.chart(trade_id="1006")
+
+
+def test_a_removed_symbol_reads_the_same_instrument_under_its_current_name(bridge, monkeypatch):
+    from mt5bridge import testing
+    # 1007: trade 1001 again, on an account type whose EURUSD+ the broker has since removed
+    monkeypatch.setattr(testing, "DEALS", testing.DEALS + [
+        testing.deal(70, 1007, "2026-11-10 10:00", testing.B, testing.IN, "EURUSD+", 0.10, 1.0700, sl=1.0680),
+        testing.deal(71, 1007, "2026-11-10 14:00", testing.S, testing.OUT, "EURUSD+", 0.10, 1.0750, profit=50.0,
+                     sl=1.0680)])
+    res = bridge.trade("1007")
+    assert res["trade"]["symbol"] == "EURUSD+" and "market_data" not in res
+    assert res["candles"]["symbol"] == "EURUSD" and res["candles"]["rows"]
+    assert res["excursions"]["mfe_points"] == pytest.approx(600.0) and res["excursions"]["r_multiple"] == 2.5
+    assert res["substitute"] == ("EURUSD+ is no longer offered by the broker: candles and MAE/MFE come from "
+                                 "EURUSD, the same instrument under its current name")
+    assert bridge.chart(trade_id="1007")[:4] == b"\x89PNG"
+    candles = bridge.candles("EURUSD+", "H1", count=3)
+    assert candles["symbol"] == "EURUSD" and candles["count"] == 3 and "EURUSD+" in candles["substitute"]
+    assert bridge.symbol_spec("EURUSD+")["symbol"] == "EURUSD"
+    with pytest.raises(RemoteError, match="unknown symbol: GBPCHF\\+"):  # its instrument is gone too
+        bridge.candles("GBPCHF+", "H1", count=3)
 
 
 def test_symbol_lookup_is_forgiving(bridge):
@@ -263,6 +302,16 @@ def test_setup_installs_skill_and_reports_compile(tmp_path, capsys, monkeypatch)
     with pytest.raises(BridgeError, match="not a copy"):
         install.install_skill(foreign)  # never overwrites a folder that is not this skill
     assert "something-else" in (foreign / "mt5bridge" / "SKILL.md").read_text()
+
+
+def test_bars_until_a_moment_for_analysis_code(bridge):
+    from mt5bridge.testing import ts
+
+    at = ts("2026-11-10 10:30")
+    bars = bridge.bars_until("EURUSD+", "h1", at, 5)  # a removed name reads EURUSD
+    assert (bars["symbol"], bars["tf"], bars["point"], bars["digits"]) == ("EURUSD", "H1", 0.00001, 5)
+    assert [r[0] for r in bars["rows"]] == [ts("2026-11-10 06:00") + i * 3600 for i in range(5)]
+    assert bars["rows"][-1][0] <= at < bars["rows"][-1][0] + 3600  # the last bar was still forming
 
 
 def test_today_activity(bridge):

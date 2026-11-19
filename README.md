@@ -137,8 +137,9 @@ work too).
   went in your favour. **Gave back** = MFE − captured: how far price came back from the best
   point before the exit. **Efficiency** = captured / MFE, winners only. R values use the SL at
   entry.
-- Old trades on symbols the broker has removed still come back, with a `market_data` note
-  instead of candles.
+- Old trades on symbols the broker has removed (`EURUSD+` after an account type change) read
+  their candles and MAE/MFE from the same instrument under its current name (`EURUSD`), with a
+  `substitute` note. When there is no such instrument either, a `market_data` note replaces them.
 - Symbols are forgiving: `eurusd` finds `EURUSD`, and `EURUSD` finds the broker's `EURUSD.s`
   or `EURUSD+` when only one of them is in Market Watch.
 - Candles are columns + rows to keep token use low. The timeframe is picked from the trade's

@@ -97,7 +97,9 @@ async def get_trade(trade_id: str, timeframe: str | None = None, bars_before: in
 
     trade_id is the "id" from list_trades. timeframe is picked from the trade's duration if omitted.
     efficiency is given for winning trades only; R values only when the trade had an SL at entry.
-    If the broker has removed the symbol, a "market_data" note replaces candles and MAE/MFE.
+    If the broker has removed the symbol (EURUSD+), candles and MAE/MFE come from the same instrument
+    under its current name (EURUSD) and a "substitute" note says so; if there is no such instrument,
+    a "market_data" note replaces them.
     """
     return await _call("trade", trade_id, timeframe, bars_before, bars_after, max_bars, include_candles)
 

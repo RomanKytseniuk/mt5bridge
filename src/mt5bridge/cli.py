@@ -17,8 +17,10 @@ times: YYYY-MM-DD, "YYYY-MM-DD HH:MM", now, today, yesterday, or look-backs like
 timeframes: M1 M5 M15 M30 H1 H4 D1 W1 MN1 (and M2..M20, H2..H12); 1h, 15m, 1d also work.
 fields: exit_reason: sl, tp, so (stop out), client (manual), expert, mobile, web.
         net = profit + commission + swap + fee. MAE/MFE come from bar highs/lows (approximate).
-        efficiency is for winning trades only; R values need an SL at entry. A "market_data" note
-        means the broker removed the symbol, so there are no candles. `trades` returns "total" and
+        efficiency is for winning trades only; R values need an SL at entry. A "substitute" note
+        means the broker removed the symbol (EURUSD+) and the candles come from the same instrument
+        under its current name (EURUSD); a "market_data" note means there is no such instrument
+        either, so there are no candles. `trades` returns "total" and
         "returned": when they differ, raise --limit (0 = all). `stats --by weekday|hour` uses the
         open time, `--by day|month` the close time. `chart` prints the path of the saved PNG.
 terminals: with several MT5 terminals, `status` shows which one is used; pin it with --dir.

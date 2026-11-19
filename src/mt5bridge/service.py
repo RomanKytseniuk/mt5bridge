@@ -1,5 +1,6 @@
 """High-level API shared by the CLI and the MCP server. Every public method returns JSON-ready data."""
 
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -17,8 +18,10 @@ from .trades import SIDES, build_trades, positions_missing_entry, public, short_
 DEFAULT_LOOKBACK_S = 30 * 86400
 EXCURSION_LADDER = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
 EXCURSION_MAX_BARS = 5000
+NO_HISTORY_TTL_S = 600  # how long a missing stretch of history is not asked for again
 CANDLE_COLS = ["time", "open", "high", "low", "close", "volume"]
 TIMES_NOTE = "all times are broker server time, as shown on the MT5 chart"
+_INSTRUMENT = re.compile(r"[A-Za-z0-9]+")  # EURUSD in EURUSD+, EURUSD.s, EURUSD_i
 
 
 def _utc_offset(server_ts: int, gmt_ts: int) -> str:
@@ -68,6 +71,9 @@ class Bridge:
     def __init__(self, client: BridgeClient | None = None, *, bridge_dir: str | None = None, timeout: float = 15.0):
         self.client = client or BridgeClient(bridge_dir, timeout=timeout)
         self._symbols: dict[str, dict[str, Any]] = {}
+        self._substitutes: dict[str, str] = {}  # removed symbol -> the same instrument's current name
+        # (symbol, tf) -> (latest start that had no history, when): earlier starts have none either
+        self._no_history: dict[tuple[str, str], tuple[int, float]] = {}
         self._now: tuple[float, int] | None = None
 
     # ------------------------------------------------------------------ basics
@@ -121,12 +127,47 @@ class Bridge:
 
     def _symbol_info(self, symbol: str) -> dict[str, Any]:
         if symbol not in self._symbols:
-            self._symbols[symbol] = self.client.request("symbol", symbol=symbol)
+            try:
+                self._symbols[symbol] = self.client.request("symbol", symbol=symbol)
+            except RemoteError as exc:
+                self._symbols[symbol] = self._symbol_info(self._substitute(symbol, exc))
         return self._symbols[symbol]
+
+    def _substitute(self, symbol: str, exc: RemoteError) -> str:
+        """For a symbol the broker has removed (EURUSD+ after an account type change), the same
+        instrument under its current name, resolved by the EA like any short name (EURUSD). Re-raises
+        exc when there is none: then the market data is really gone."""
+        if symbol in self._substitutes:
+            return self._substitutes[symbol]
+        base = _INSTRUMENT.match(symbol)
+        if not str(exc).startswith("unknown symbol") or not base or base.group(0) == symbol:
+            raise exc
+        try:
+            name = self.client.request("symbol", symbol=base.group(0))["symbol"]
+        except RemoteError:
+            raise exc from None
+        self._substitutes[symbol] = name
+        return name
+
+    def substitute_note(self, symbol: str) -> str | None:
+        """Says where the market data came from when `symbol` was read under another name."""
+        name = self._substitutes.get(symbol)
+        if not name:
+            return None
+        return (f"{symbol} is no longer offered by the broker: candles and MAE/MFE come from {name}, "
+                "the same instrument under its current name")
 
     # ------------------------------------------------------------------ candles
     def _rates(self, symbol: str, tf: str, *, frm: int | None = None, to: int | None = None,
                count: int | None = None) -> dict[str, Any]:
+        try:
+            return self._rates_of(self._substitutes.get(symbol, symbol), tf, frm, to, count)
+        except RemoteError as exc:
+            if symbol in self._substitutes:
+                raise
+            return self._rates_of(self._substitute(symbol, exc), tf, frm, to, count)
+
+    def _rates_of(self, symbol: str, tf: str, frm: int | None, to: int | None, count: int | None) -> dict[str, Any]:
         params = {"symbol": symbol, "tf": tf, "from": frm, "to": to, "count": count}
         for attempt in range(4):
             try:
@@ -161,6 +202,8 @@ class Bridge:
         if len(rows) > max_bars:
             rows, truncated = rows[-max_bars:], True
         result = self._compact(data["symbol"], tf, rows, truncated)
+        if self.substitute_note(symbol):
+            result["substitute"] = self.substitute_note(symbol)
         if truncated:
             result["warning"] = f"only the last {len(rows)} candles are returned; narrow the range or use a larger timeframe"
         return result
@@ -262,13 +305,27 @@ class Bridge:
                     "unavailable": f"no market data for {t['symbol']}: {exc}. The broker may have removed this symbol."}
 
     def _excursions(self, t: dict[str, Any], info: dict[str, Any], end_ts: float) -> dict[str, Any] | None:
+        """MAE/MFE on the smallest timeframe that fits the trade and still has history: brokers keep
+        M1/M5 for months only, so an older trade is measured on M15 or higher."""
         duration = max(end_ts - t["_open_ts"], 1)
-        ex_tf = next((tf for tf in EXCURSION_LADDER if duration / TF_SECONDS[tf] <= EXCURSION_MAX_BARS), "D1")
-        try:
-            ex_rows = self._rates(t["symbol"], ex_tf, frm=int(t["_open_ts"]) - TF_SECONDS[ex_tf], to=int(end_ts))["rows"]
-            return analysis.excursions(t, ex_rows, ex_tf, TF_SECONDS[ex_tf], info)
-        except RemoteError as exc:
-            return {"error": str(exc)}
+        first = next((i for i, tf in enumerate(EXCURSION_LADDER) if duration / TF_SECONDS[tf] <= EXCURSION_MAX_BARS),
+                     len(EXCURSION_LADDER) - 1)
+        missing: RemoteError | None = None
+        for ex_tf in EXCURSION_LADDER[first:]:
+            frm = int(t["_open_ts"]) - TF_SECONDS[ex_tf]
+            key = (self._substitutes.get(t["symbol"], t["symbol"]), ex_tf)
+            failed = self._no_history.get(key)
+            if failed and frm <= failed[0] and time.monotonic() - failed[1] < NO_HISTORY_TTL_S:
+                continue  # history from even later was not there a moment ago: do not wait for it again
+            try:
+                ex_rows = self._rates(t["symbol"], ex_tf, frm=frm, to=int(end_ts))["rows"]
+                return analysis.excursions(t, ex_rows, ex_tf, TF_SECONDS[ex_tf], info)
+            except RemoteError as exc:
+                if not str(exc).startswith("history_loading"):
+                    return {"error": str(exc)}
+                self._no_history[key] = (max(frm, failed[0]) if failed else frm, time.monotonic())
+                missing = exc
+        return {"error": str(missing) if missing else "no candle history this far back"}
 
     def _trade_market_data(self, t: dict[str, Any], timeframe: str | None, bars_before: int, bars_after: int,
                            max_bars: int, candles: bool = True) -> dict[str, Any]:
@@ -309,8 +366,10 @@ class Bridge:
         result: dict[str, Any] = {"trade": public(t), "excursions": b["excursions"], "note": TIMES_NOTE}
         if "unavailable" in b:
             result["market_data"] = b["unavailable"]
-        elif include_candles:
-            candles = self._compact(t["symbol"], b["tf"], b["rows"], b["truncated"])
+        elif self.substitute_note(t["symbol"]):
+            result["substitute"] = self.substitute_note(t["symbol"])
+        if "unavailable" not in b and include_candles:
+            candles = self._compact(self._substitutes.get(t["symbol"], t["symbol"]), b["tf"], b["rows"], b["truncated"])
             candles["entry_index"] = b["entry_index"]
             candles["exit_index"] = b["exit_index"] if t["status"] != "open" else None
             if b["truncated"]:
@@ -332,6 +391,16 @@ class Bridge:
         except RemoteError:
             return None
         return self._excursions(t, info, t["_close_ts"])
+
+    def bars_until(self, symbol: str, tf: str, ts: float, count: int) -> dict[str, Any]:
+        """The last `count` bars of `tf` that had opened by `ts`, oldest first, as raw rows [time, open,
+        high, low, close, volume, ...]; the last one may still have been forming at ts. With the symbol
+        the rows came from (see _substitute), its point and digits. Raises RemoteError without data."""
+        tf = normalize_tf(tf)
+        rows = [r for r in self._rates(symbol, tf, to=int(ts), count=count)["rows"] if r[0] <= ts]
+        info = self._symbol_info(symbol)
+        return {"symbol": self._substitutes.get(symbol, symbol), "tf": tf, "rows": rows[-count:],
+                "point": info.get("point"), "digits": info.get("digits")}
 
     # ------------------------------------------------------------------ live
     def live(self) -> dict[str, Any]:
